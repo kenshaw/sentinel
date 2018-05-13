@@ -213,6 +213,12 @@ func IgnoreServerClosed(err error) bool {
 	return err == http.ErrServerClosed
 }
 
+// IgnoreListenerClosed returns true when the passed error is the
+// netmux.ErrListenerClosed error.
+func IgnoreListenerClosed(err error) bool {
+	return err == netmux.ErrListenerClosed
+}
+
 // IgnoreNetOpError returns true when the passed error is a net.OpError with
 // error "use of closed network connection".
 func IgnoreNetOpError(err error) bool {

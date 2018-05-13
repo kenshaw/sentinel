@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brankas/connmux"
+	"github.com/brankas/netmux"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -148,8 +148,9 @@ func (s *Sentinel) Register(server, shutdown interface{}, ignore ...func(error) 
 	return nil
 }
 
-// ConnMux creates a new connection muxer and registers it.
-func (s *Sentinel) ConnMux(listener net.Listener, opts ...connmux.Option) (*connmux.ConnMux, error) {
+// Mux creates a new network connection muxer and registers its server,
+// shutdown, and ignore error funcs.
+func (s *Sentinel) Mux(listener net.Listener, opts ...netmux.Option) (*netmux.Netmux, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -158,13 +159,13 @@ func (s *Sentinel) ConnMux(listener net.Listener, opts ...connmux.Option) (*conn
 	}
 
 	// create connection mux
-	mux, err := connmux.New(listener, opts...)
+	mux, err := netmux.New(listener, opts...)
 	if err != nil {
 		return nil, err
 	}
 
 	// register server + shutdown
-	if err = s.Register(mux, mux, IgnoreError(connmux.ErrListenerClosed), IgnoreNetOpError); err != nil {
+	if err = s.Register(mux, mux, IgnoreError(netmux.ErrListenerClosed), IgnoreNetOpError); err != nil {
 		return nil, err
 	}
 

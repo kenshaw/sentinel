@@ -68,6 +68,7 @@ func New(opts ...Option) (*Sentinel, error) {
 func (s *Sentinel) Run(ctxt context.Context) error {
 	s.Lock()
 	if s.started {
+		defer s.Unlock()
 		return ErrAlreadyStarted
 	}
 	s.started = true
@@ -132,9 +133,8 @@ func (s *Sentinel) ShutdownIgnore(err error) bool {
 
 // Register registers a server, its shutdown func, and ignore error funcs.
 func (s *Sentinel) Register(server, shutdown interface{}, ignore ...func(error) bool) error {
-	var err error
-
 	// add server and shutdown funcs
+	var err error
 	s.serverFuncs, err = convertAndAppendContextFuncs(s.serverFuncs, server)
 	if err != nil {
 		return err
@@ -165,7 +165,7 @@ func (s *Sentinel) Mux(listener net.Listener, opts ...netmux.Option) (*netmux.Ne
 	}
 
 	// register server + shutdown
-	if err = s.Register(mux, mux, IgnoreError(netmux.ErrListenerClosed), IgnoreNetOpError); err != nil {
+	if err = s.Register(mux, mux, IgnoreListenerClosed, IgnoreNetOpError); err != nil {
 		return nil, err
 	}
 

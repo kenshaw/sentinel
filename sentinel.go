@@ -18,21 +18,22 @@ const (
 	DefaultShutdownDuration = 10 * time.Second
 )
 
-// Sentinel manages servers and associated shutdown listeners.
+// Sentinel manages servers, shutdown listeners, and related errors.
 type Sentinel struct {
 	serverFuncs      []func(context.Context) error
 	shutdownFuncs    []func(context.Context) error
 	shutdownDuration time.Duration
 	shutdownSigs     []os.Signal
 	ignoreErrors     []func(error) bool
-	logf             func(string, ...interface{})
-	errf             func(string, ...interface{})
+
+	logf func(string, ...interface{})
+	errf func(string, ...interface{})
 
 	sync.Mutex
 	started bool
 }
 
-// New creates a new sentinal server group.
+// New creates a new sentinel server group.
 func New(opts ...Option) (*Sentinel, error) {
 	s := &Sentinel{
 		shutdownDuration: DefaultShutdownDuration,
@@ -95,14 +96,14 @@ func (s *Sentinel) Run(ctxt context.Context) error {
 		}
 	}())
 
-	if err := eg.Wait(); !s.ShutdownIgnore(err) {
+	if err := eg.Wait(); err != nil && !s.ShutdownIgnore(err) {
 		return err
 	}
 
 	return nil
 }
 
-// Shutdown calls all of the registered shutdown funcs.
+// Shutdown calls all registered shutdown funcs.
 func (s *Sentinel) Shutdown() error {
 	var firstErr error
 	for i, f := range s.shutdownFuncs {
@@ -207,16 +208,16 @@ func IgnoreError(err error) func(error) bool {
 	}
 }
 
-// IgnoreServerClosed returns true when the passed error is the
-// http.ErrServerClosed error.
-func IgnoreServerClosed(err error) bool {
-	return err == http.ErrServerClosed
-}
-
 // IgnoreListenerClosed returns true when the passed error is the
 // netmux.ErrListenerClosed error.
 func IgnoreListenerClosed(err error) bool {
 	return err == netmux.ErrListenerClosed
+}
+
+// IgnoreServerClosed returns true when the passed error is the
+// http.ErrServerClosed error.
+func IgnoreServerClosed(err error) bool {
+	return err == http.ErrServerClosed
 }
 
 // IgnoreNetOpError returns true when the passed error is a net.OpError with

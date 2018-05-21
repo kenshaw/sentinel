@@ -14,21 +14,19 @@ import (
 func TestNewAndRun(t *testing.T) {
 	t.Parallel()
 
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not create listener: %v", err)
+	}
+
 	h := &http.Server{
 		Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 			fmt.Fprint(res, "foobar")
 		}),
 	}
 
-	// listener address
-	addr := new(string)
 	s, err := New(
 		Server(func() error {
-			l, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				return err
-			}
-			*addr = l.Addr().String()
 			return h.Serve(l)
 		}),
 		Shutdown(h.Shutdown),
@@ -42,8 +40,7 @@ func TestNewAndRun(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		<-time.After(1 * time.Second)
-		res, err := grab(t, "http://"+*addr)
+		res, err := grab(t, "http://"+l.Addr().String())
 		if err != nil {
 			t.Fatalf("expected no error, got: %v", err)
 		}
@@ -58,7 +55,7 @@ func TestNewAndRun(t *testing.T) {
 	}
 
 	// check that the server has been shutdown
-	_, err = grab(t, "http://"+*addr)
+	_, err = grab(t, "http://"+l.Addr().String())
 	if err == nil {
 		t.Errorf("expected error")
 	} else {
@@ -76,7 +73,7 @@ func TestNewAndHTTP(t *testing.T) {
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("could not create a listener: %v", err)
+		t.Fatalf("could not create listener: %v", err)
 	}
 
 	s, err := New()

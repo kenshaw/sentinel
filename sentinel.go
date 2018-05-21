@@ -31,6 +31,7 @@ type Sentinel struct {
 
 	sync.Mutex
 	started bool
+	sig     chan os.Signal
 }
 
 // New creates a new sentinel server group.
@@ -88,10 +89,10 @@ func (s *Sentinel) Run(ctxt context.Context) error {
 
 	// add shutdown
 	eg.Go(func() func() error {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, s.shutdownSigs...)
+		s.sig = make(chan os.Signal, 1)
+		signal.Notify(s.sig, s.shutdownSigs...)
 		return func() error {
-			s.logf("received signal: %v", <-sig)
+			s.logf("received signal: %v", <-s.sig)
 			return s.Shutdown()
 		}
 	}())

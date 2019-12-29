@@ -1,4 +1,4 @@
 github.com/brankas/netmux v0.1.0 h1:y4AqWXzLgkHWAQxRPfUzC5kz/zikyZfTJL9hZFtiomQ=
 github.com/brankas/netmux v0.1.0/go.mod h1:+KQjdpCcBk41GUTJqWLOfM8BbXbpuPNjuRHPdgzIuOE=
-golang.org/x/sync v0.0.0-20190423024810-112230192c58 h1:8gQV6CLnAEikrhgkHFbMAEhagSSnXWGV915qUMm9mrU=
-golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e h1:vcxGaoTs7kV8m5Np9uUNQin4BrLOthgV7252N8V+FwY=
+golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=

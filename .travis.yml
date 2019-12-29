@@ -1,6 +1,6 @@
+dist: xenial
 language: go
 go:
-  - 1.12.x
-  - tip
+  - 1.13.x
 script:
   - go test -v -coverprofile=coverage.out

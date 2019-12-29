@@ -67,7 +67,7 @@ func New(opts ...Option) (*Sentinel, error) {
 
 // Run starts the server group, returning the first encountered error upon
 // shutdown.
-func (s *Sentinel) Run(ctxt context.Context) error {
+func (s *Sentinel) Run(ctx context.Context) error {
 	s.Lock()
 	if s.started {
 		defer s.Unlock()
@@ -76,13 +76,13 @@ func (s *Sentinel) Run(ctxt context.Context) error {
 	s.started = true
 	s.Unlock()
 
-	eg, ctxt := errgroup.WithContext(ctxt)
+	eg, ctx := errgroup.WithContext(ctx)
 
 	// add servers
 	for _, f := range s.serverFuncs {
 		eg.Go(func(f func(context.Context) error) func() error {
 			return func() error {
-				return f(ctxt)
+				return f(ctx)
 			}
 		}(f))
 	}
@@ -108,9 +108,9 @@ func (s *Sentinel) Run(ctxt context.Context) error {
 func (s *Sentinel) Shutdown() error {
 	var firstErr error
 	for i, f := range s.shutdownFuncs {
-		ctxt, cancel := context.WithTimeout(context.Background(), s.shutdownDuration)
+		ctx, cancel := context.WithTimeout(context.Background(), s.shutdownDuration)
 		defer cancel()
-		if err := f(ctxt); err != nil {
+		if err := f(ctx); err != nil {
 			s.errf("could not shutdown %d: %v", i, err)
 			if firstErr == nil {
 				firstErr = err
@@ -144,7 +144,6 @@ func (s *Sentinel) Register(server, shutdown interface{}, ignore ...func(error) 
 	s.shutdownFuncs, err = convertAndAppendContextFuncs(s.shutdownFuncs, shutdown)
 	if err != nil {
 		return err
-
 	}
 	s.ignoreErrors = append(s.ignoreErrors, ignore...)
 	return nil
@@ -229,3 +228,111 @@ func IgnoreNetOpError(err error) bool {
 	}
 	return false
 }
+
+// Option is a sentinel option.
+type Option = func(*Sentinel) error
+
+// Register is a sentinel option to register a server, its shutdown listener,
+// and ignore error handlers.
+//
+// Both server and shutdown can have a type of `func()`, `func() error`, or
+// `func(context.Context) error`.
+func Register(server, shutdown interface{}, ignore ...func(error) bool) Option {
+	return func(s *Sentinel) error {
+		s.Lock()
+		defer s.Unlock()
+
+		if s.started {
+			return ErrAlreadyStarted
+		}
+
+		return s.Register(server, shutdown, ignore...)
+	}
+}
+
+// Server is a sentinel option to add server funcs.
+//
+// Any server can have a type of `func()`, `func() error`, or
+// `func(context.Context) error`.
+func Server(serverFuncs ...interface{}) Option {
+	return func(s *Sentinel) error {
+		s.Lock()
+		defer s.Unlock()
+
+		if s.started {
+			return ErrAlreadyStarted
+		}
+
+		var err error
+		s.serverFuncs, err = convertAndAppendContextFuncs(s.serverFuncs, serverFuncs...)
+		return err
+	}
+}
+
+// Shutdown is a sentinel option to add shutdown listeners.
+//
+// Any shutdown listener can have a type of `func()`, `func() error`, or
+// `func(context.Context) error`.
+func Shutdown(shutdownFuncs ...interface{}) Option {
+	return func(s *Sentinel) error {
+		s.Lock()
+		defer s.Unlock()
+
+		if s.started {
+			return ErrAlreadyStarted
+		}
+
+		var err error
+		s.shutdownFuncs, err = convertAndAppendContextFuncs(s.shutdownFuncs, shutdownFuncs...)
+		return err
+	}
+}
+
+// Ignore is a sentinel option to add ignore error handlers.
+func Ignore(ignore ...func(error) bool) Option {
+	return func(s *Sentinel) error {
+		s.Lock()
+		defer s.Unlock()
+
+		if s.started {
+			return ErrAlreadyStarted
+		}
+
+		s.ignoreErrors = append(s.ignoreErrors, ignore...)
+		return nil
+	}
+}
+
+// Sigs is a sentinel option to set the specified signals for shutdown.
+func Sigs(sigs ...os.Signal) Option {
+	return func(s *Sentinel) error {
+		s.Lock()
+		defer s.Unlock()
+
+		if s.started {
+			return ErrAlreadyStarted
+		}
+
+		s.shutdownSigs = sigs
+		return nil
+	}
+}
+
+// Logf is a sentinel option to set a logger.
+func Logf(f func(string, ...interface{})) Option {
+	return func(s *Sentinel) error {
+		s.logf = f
+		return nil
+	}
+}
+
+// Errorf is a sentinel option to set a error logger.
+func Errorf(f func(string, ...interface{})) Option {
+	return func(s *Sentinel) error {
+		s.errf = f
+		return nil
+	}
+}
+
+// ServerOption is a HTTP server option.
+type ServerOption = func(*http.Server) error

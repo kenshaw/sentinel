@@ -6,10 +6,16 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func init() {
+	Logf = func(string, ...interface{}) {}
+	Errorf = func(string, ...interface{}) {}
+}
 
 func TestNewAndRun(t *testing.T) {
 	t.Parallel()
@@ -26,11 +32,11 @@ func TestNewAndRun(t *testing.T) {
 	}
 
 	s, err := New(
-		Server(func() error {
+		RegisterServer(func() error {
 			return h.Serve(l)
 		}),
-		Shutdown(h.Shutdown),
-		Ignore(IgnoreServerClosed, IgnoreNetOpError),
+		RegisterShutdown(h.Shutdown),
+		RegisterIgnore(IgnoreServerClosed, IgnoreNetOpError),
 	)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -44,13 +50,13 @@ func TestNewAndRun(t *testing.T) {
 		if res != "foobar" {
 			t.Errorf("expected body %q, got: %q", "foobar", res)
 		}
-		s.sig <- syscall.SIGINT
+		raise(syscall.SIGINT)
 	}()
 
-	ctxt, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctxt, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	if err = s.Run(ctxt); err != nil {
+	if err = s.Run(ctxt, 2*time.Second); err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
 
@@ -58,15 +64,12 @@ func TestNewAndRun(t *testing.T) {
 	_, err = grab(t, "http://"+l.Addr().String())
 	if err == nil {
 		t.Errorf("expected error")
-	} else {
-		t.Logf("received error %v", err)
 	}
 
-	err = s.Run(ctxt)
+	err = s.Run(ctxt, 2*time.Second)
 	if err != ErrAlreadyStarted {
 		t.Errorf("expected already started error, got: %v", err)
 	}
-
 }
 
 func TestNewAndHTTP(t *testing.T) {
@@ -97,13 +100,13 @@ func TestNewAndHTTP(t *testing.T) {
 		if res != "foobar" {
 			t.Errorf("expected body %q, got: %q", "foobar", res)
 		}
-		s.sig <- syscall.SIGINT
+		raise(syscall.SIGINT)
 	}()
 
 	ctxt, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err = s.Run(ctxt); err != nil {
+	if err = s.Run(ctxt, 2*time.Second); err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
 
@@ -111,11 +114,9 @@ func TestNewAndHTTP(t *testing.T) {
 	_, err = grab(t, "http://"+l.Addr().String())
 	if err == nil {
 		t.Errorf("expected error")
-	} else {
-		t.Logf("received error %v", err)
 	}
 
-	err = s.Run(ctxt)
+	err = s.Run(ctxt, 2*time.Second)
 	if err != ErrAlreadyStarted {
 		t.Errorf("expected already started error, got: %v", err)
 	}
@@ -162,11 +163,11 @@ func TestMultiHTTP(t *testing.T) {
 	}
 
 	go func() {
-		<-time.After(5 * time.Second)
-		s.sig <- syscall.SIGINT
+		<-time.After(2 * time.Second)
+		raise(syscall.SIGINT)
 	}()
 
-	if err = s.Run(ctxt); err != nil {
+	if err = s.Run(ctxt, 2*time.Second); err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
 
@@ -175,12 +176,10 @@ func TestMultiHTTP(t *testing.T) {
 		_, err = grab(t, "http://"+server.Addr().String())
 		if err == nil {
 			t.Errorf("expected error")
-		} else {
-			t.Logf("received error %v", err)
 		}
 	}
 
-	err = s.Run(ctxt)
+	err = s.Run(ctxt, 2*time.Second)
 	if err != ErrAlreadyStarted {
 		t.Errorf("expected already started error, got: %v", err)
 	}
@@ -194,14 +193,12 @@ func grab(t *testing.T, urlstr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	cl := &http.Client{}
 	res, err := cl.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer res.Body.Close()
-
 	buf, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		return "", err
@@ -209,4 +206,14 @@ func grab(t *testing.T, urlstr string) (string, error) {
 
 	t.Logf("body %s: %s", urlstr, string(buf))
 	return string(buf), nil
+}
+
+func raise(sig os.Signal) {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		panic(err)
+	}
+	if err = p.Signal(sig); err != nil {
+		panic(err)
+	}
 }

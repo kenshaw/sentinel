@@ -1,10 +1,9 @@
-// Package sentinel provides a sentinel server group.
+// Package sentinel provides a sentinel run group manager.
 package sentinel
 
 import (
 	"context"
-	"errors"
-	"log"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -15,59 +14,82 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var Logf = log.Printf
-var Errorf = func(s string, v ...interface{}) { Logf("ERROR: "+s, v...) }
+// Logger is a logger interface.
+//
+// Allowed types:
+//
+// func(string, ...interface{})
+// func(string, ...interface{}) error
+// func(string)
+// interface {
+//   Printf(string, ...interface{})
+// }
+type Logger interface{}
 
-// Server is a server.
-type Server struct {
-	start    func(context.Context) error
-	shutdown func(context.Context) error
-}
-
-// NewServer creates a new server.
-func NewServer(start, shutdown interface{}) (Server, error) {
-	var err error
-	var st, sh func(context.Context) error
-	if start != nil {
-		st, err = convertContextFunc(start)
-		if err != nil {
-			return Server{}, err
-		}
-	}
-	if shutdown != nil {
-		sh, err = convertContextFunc(shutdown)
-		if err != nil {
-			return Server{}, err
-		}
-	}
-	return Server{
-		start:    st,
-		shutdown: sh,
-	}, nil
-}
-
-// Sentinel is a sentinel server group that manages servers and related ignore
-// error handlers.
+// Sentinel is a sentinel run group manager.
 type Sentinel struct {
-	servers []Server
-	ignore  []func(error) bool
-	started bool
+	sigs     []os.Signal
+	g        *errgroup.Group
+	ctx      context.Context
+	cancel   func()
+	managers []Manager
+	started  bool
 	sync.Mutex
 }
 
-// New creates a new sentinel server group.
-func New(opts ...Option) (*Sentinel, error) {
-	s := new(Sentinel)
-	for _, o := range opts {
-		if err := o(s); err != nil {
-			return nil, err
-		}
+// WithContext creates a new sentinel run group manager.
+func WithContext(ctx context.Context, sigs ...os.Signal) (*Sentinel, context.Context) {
+	if sigs == nil {
+		sigs = []os.Signal{os.Interrupt}
 	}
-	return s, nil
+	s := &Sentinel{
+		sigs: sigs,
+	}
+	ctx, s.cancel = context.WithCancel(ctx)
+	s.g, s.ctx = errgroup.WithContext(ctx)
+	return s, ctx
 }
 
-// Run starts the sentinel server group.
-func (s *Sentinel) Run(ctx context.Context, timeout time.Duration, sigs ...os.Signal) error {
+// Manage creates and registers a manager to the sentinel for the provided
+// start and shutdown funcs, adding any error ignores funcs to the run group.
+func (s *Sentinel) Manage(start, shutdown interface{}, ignore ...func(error) bool) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.started {
+		return ErrAlreadyStarted
+	}
+	manager, err := NewManager(start, shutdown, ignore...)
+	if err != nil {
+		return err
+	}
+	s.managers = append(s.managers, manager)
+	return nil
+}
+
+// ManageHTTP creates and registers a manager for a HTTP server for the
+// specified listener and handler, and registers the created HTTP server, its
+// shutdown, and related ignore funcs (IgnoreServerClosed, IgnoreNetOpError)
+// with the server sentinel group.
+func (s *Sentinel) ManageHTTP(listener net.Listener, handler http.Handler, opts ...func(*http.Server) error) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.started {
+		return ErrAlreadyStarted
+	}
+	manager, err := convhttp(listener, handler, opts)
+	if err != nil {
+		return err
+	}
+	s.managers = append(s.managers, manager)
+	return nil
+}
+
+// Run runs the sentinel run group using the logger, and kill timeout.
+func (s *Sentinel) Run(logger Logger, timeout time.Duration) error {
+	logf, err := convlogf(logger)
+	if err != nil {
+		return err
+	}
 	s.Lock()
 	if s.started {
 		defer s.Unlock()
@@ -75,53 +97,42 @@ func (s *Sentinel) Run(ctx context.Context, timeout time.Duration, sigs ...os.Si
 	}
 	s.started = true
 	s.Unlock()
-
-	eg, ctx := errgroup.WithContext(ctx)
-
-	// add servers
-	for _, server := range s.servers {
-		if server.start == nil {
-			continue
-		}
-		eg.Go(func(f func(context.Context) error) func() error {
-			return func() error {
-				return f(ctx)
-			}
-		}(server.start))
-	}
-
-	// add shutdown
-	eg.Go(func() func() error {
-		if sigs == nil {
-			sigs = []os.Signal{os.Interrupt}
-		}
+	s.g.Go(func() func() error {
 		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, sigs...)
+		signal.Notify(sig, s.sigs...)
 		return func() error {
-			Logf("received signal: %v", <-sig)
-			return s.ShutdownWithTimeout(ctx, timeout)
+			logf("received signal: %v", <-sig)
+			ctx, cancel := context.WithTimeout(s.ctx, timeout)
+			defer cancel()
+			return s.shutdown(ctx, logf)
 		}
 	}())
-
-	if err := eg.Wait(); err != nil && !s.shutdownIgnore(err) {
+	for _, m := range s.managers {
+		if m.start == nil {
+			continue
+		}
+		s.g.Go(func(f func(context.Context) error) func() error {
+			return func() error {
+				return f(s.ctx)
+			}
+		}(m.start))
+	}
+	if err := s.g.Wait(); err != nil && !s.ignoreErr(err) {
 		return err
 	}
-
 	return nil
 }
 
-// ShutdownWithTimeout calls all registered shutdown funcs.
-func (s *Sentinel) ShutdownWithTimeout(ctx context.Context, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
+// shutdown notifies all sentinel managers to shutdown.
+func (s *Sentinel) shutdown(ctx context.Context, logf func(string, ...interface{})) error {
+	defer s.cancel()
 	var firstErr error
-	for i, server := range s.servers {
-		if server.shutdown == nil {
+	for i, m := range s.managers {
+		if m.shutdown == nil {
 			continue
 		}
-		if err := server.shutdown(ctx); err != nil {
-			Errorf("could not shutdown %d: %v", i, err)
+		if err := m.shutdown(ctx); err != nil {
+			logf("could not shutdown %d: %v", i, err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -130,62 +141,19 @@ func (s *Sentinel) ShutdownWithTimeout(ctx context.Context, timeout time.Duratio
 	return firstErr
 }
 
-// Shutdown calls all registered shutdown funcs.
-func (s *Sentinel) Shutdown() error {
-	return s.ShutdownWithTimeout(context.Background(), 10*time.Second)
-}
-
-// shutdownIgnore returns if any of the registered ignore error handlers
-// reported true.
-func (s *Sentinel) shutdownIgnore(err error) bool {
+// ignoreErr determines if an error should be ignored.
+func (s *Sentinel) ignoreErr(err error) bool {
 	if err == nil {
 		return true
 	}
-	for _, f := range s.ignore {
-		if z := f(err); z {
-			return true
+	for _, m := range s.managers {
+		for _, f := range m.ignore {
+			if z := f(err); z {
+				return true
+			}
 		}
 	}
 	return false
-}
-
-// Register registers a server to the sentinel group, a related (optional)
-// shutdown func, and any ignore error handlers.
-func (s *Sentinel) Register(start, shutdown interface{}, ignore ...func(error) bool) error {
-	// add servers, shutdowns, ignores
-	server, err := NewServer(start, shutdown)
-	if err != nil {
-		return err
-	}
-	s.servers = append(s.servers, server)
-	s.ignore = append(s.ignore, ignore...)
-	return nil
-}
-
-// HTTP creates a HTTP server for the specified listener and handler, and
-// registers the created HTTP server, its shutdown, and related ignore funcs
-// (IgnoreServerClosed, IgnoreNetOpError) with the server sentinel group.
-func (s *Sentinel) HTTP(listener net.Listener, handler http.Handler, opts ...func(*http.Server) error) error {
-	s.Lock()
-	defer s.Unlock()
-	if s.started {
-		return ErrAlreadyStarted
-	}
-
-	var err error
-	server := &http.Server{
-		Handler: handler,
-	}
-	for _, o := range opts {
-		if err = o(server); err != nil {
-			return err
-		}
-	}
-
-	// register server
-	return s.Register(func() error {
-		return server.Serve(listener)
-	}, server.Shutdown, IgnoreServerClosed, IgnoreNetOpError)
 }
 
 // IgnoreError returns a func that returns true when passed errors match.
@@ -210,82 +178,56 @@ func IgnoreNetOpError(err error) bool {
 	return false
 }
 
-// Option is a sentinel server group option.
-type Option = func(*Sentinel) error
-
-// Register is a sentinel server group option to register a server and an
-// associated shutdown handler.
-//
-// Both server and shutdown can have a type of `func()`, `func() error`, or
-// `func(context.Context) error`.
-func Register(servers ...Server) Option {
-	return func(s *Sentinel) error {
-		s.Lock()
-		defer s.Unlock()
-		if s.started {
-			return ErrAlreadyStarted
-		}
-		s.servers = append(s.servers, servers...)
-		return nil
-	}
+// Manager is a sentinel run manager holding the specific start and shutdown
+// funcs for a sentinel.
+type Manager struct {
+	start    func(context.Context) error
+	shutdown func(context.Context) error
+	ignore   []func(error) bool
 }
 
-// RegisterServer is a sentinel server group option to add servers without any
-// associated shutdown handlers.
-//
-// Any server can have a type of `func()`, `func() error`, or
-// `func(context.Context) error`.
-func RegisterServer(starts ...interface{}) Option {
-	return func(s *Sentinel) error {
-		var servers []Server
-		for _, f := range starts {
-			start, err := convertContextFunc(f)
-			if err != nil {
-				return err
-			}
-			servers = append(servers, Server{start: start})
+// NewManager creates a sentinel run manager for the provided start and
+// shutdown funcs.
+func NewManager(start, shutdown interface{}, ignore ...func(error) bool) (Manager, error) {
+	var err error
+	var st, sh func(context.Context) error
+	if start != nil {
+		st, err = convf(start)
+		if err != nil {
+			return Manager{}, err
 		}
-		return Register(servers...)(s)
 	}
+	if shutdown != nil {
+		sh, err = convf(shutdown)
+		if err != nil {
+			return Manager{}, err
+		}
+	}
+	return Manager{
+		start:    st,
+		shutdown: sh,
+		ignore:   ignore,
+	}, nil
 }
 
-// RegisterShutdown is a sentinel server group option to add a shutdown
-// handlers without any associated servers.
-//
-// Any shutdown listener can have a type of `func()`, `func() error`, or
-// `func(context.Context) error`.
-func RegisterShutdown(shutdowns ...interface{}) Option {
-	return func(s *Sentinel) error {
-		var servers []Server
-		for _, f := range shutdowns {
-			shutdown, err := convertContextFunc(f)
-			if err != nil {
-				return err
-			}
-			servers = append(servers, Server{shutdown: shutdown})
-		}
-		return Register(servers...)(s)
-	}
+// Error is an error.
+type Error string
+
+// Error satisfies the error interface.
+func (err Error) Error() string {
+	return string(err)
 }
 
-// RegisterIgnore is a sentinel server group option to add ignore error handlers.
-func RegisterIgnore(ignore ...func(error) bool) Option {
-	return func(s *Sentinel) error {
-		s.Lock()
-		defer s.Unlock()
-		if s.started {
-			return ErrAlreadyStarted
-		}
-		s.ignore = append(s.ignore, ignore...)
-		return nil
-	}
-}
+const (
+	// ErrAlreadyStarted is the already started error.
+	ErrAlreadyStarted Error = "already started"
 
-// ErrAlreadyStarted is the already started error.
-var ErrAlreadyStarted = errors.New("already started")
+	// ErrUnknownType is the unknown type error
+	ErrUnknownType Error = "unknown type"
+)
 
-// convertContextFunc converts an interface{} to a func(context.Context) error if possible.
-func convertContextFunc(v interface{}) (func(context.Context) error, error) {
+// convf is a util func that wraps start and shutdown interfaces.
+func convf(v interface{}) (func(context.Context) error, error) {
 	switch f := v.(type) {
 	case func(context.Context) error:
 		return f, nil
@@ -299,5 +241,44 @@ func convertContextFunc(v interface{}) (func(context.Context) error, error) {
 			return f()
 		}, nil
 	}
-	return nil, errors.New("invalid type")
+	return nil, ErrUnknownType
+}
+
+// convlogf is a util func that converts various loggers to standard logf func
+// signature.
+func convlogf(logger interface{}) (func(string, ...interface{}), error) {
+	switch v := logger.(type) {
+	case interface {
+		Printf(string, ...interface{})
+	}:
+		return v.Printf, nil
+	case func(string, ...interface{}):
+		return v, nil
+	case func(string, ...interface{}) (int, error):
+		return func(s string, args ...interface{}) {
+			v(s, args...)
+		}, nil
+	case func(string):
+		return func(s string, args ...interface{}) {
+			v(fmt.Sprintf(s, args...))
+		}, nil
+	}
+	return nil, ErrUnknownType
+}
+
+// convhttp is a util func that converts http listener and handler to a manager.
+func convhttp(l net.Listener, h http.Handler, opts []func(*http.Server) error) (Manager, error) {
+	s := &http.Server{
+		Handler: h,
+	}
+	for _, o := range opts {
+		if err := o(s); err != nil {
+			return Manager{}, err
+		}
+	}
+	return Manager{
+		start:    func(context.Context) error { return s.Serve(l) },
+		shutdown: s.Shutdown,
+		ignore:   []func(error) bool{IgnoreServerClosed, IgnoreNetOpError},
+	}, nil
 }
